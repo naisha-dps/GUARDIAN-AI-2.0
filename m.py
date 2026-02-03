@@ -1,21 +1,22 @@
-import cv2
-import time
 import os
 import sys
+
+# --- THE "EXIT CODE -4" FIXES ---
+# These must be at the VERY top before any other imports
+os.environ["OPENBLAS_CORETYPE"] = "ARMV8"
+os.environ["LD_PRELOAD"] = "/usr/lib/aarch64-linux-gnu/libgomp.so.1"
+
+import cv2
+import time
 from ultralytics import YOLO
 
 # --- CONFIGURATION ---
-# Target Animals (COCO ID): 15=Cat, 16=Dog, 17=Horse, 18=Sheep, 19=Cow, 20=Elephant, 21=Bear
 TARGET_CLASSES = [15, 16, 17, 18, 19, 20, 21, 22]
-
-# Hardware Pins (BCM Mode)
-LED_PIN = 17      # Physical Pin 11
-BUZZER_PIN = 27   # Physical Pin 13
-
-# Audio Settings - UPDATED FOR YOUR FILE NAME
-SOUND_FILE = "alert.wav.wav"  # <--- CHANGED HERE
+LED_PIN = 17      
+BUZZER_PIN = 27   
+SOUND_FILE = "alert.wav.wav"  
 sound_cooldown = 0
-COOLDOWN_TIME = 3.0  # Seconds to wait between screams
+COOLDOWN_TIME = 3.0  
 
 # --- HARDWARE SETUP ---
 try:
@@ -28,39 +29,21 @@ try:
     print("✅ Raspberry Pi Hardware Detected: GPIO Active")
 except (ImportError, RuntimeError):
     ON_RASPBERRY_PI = False
-    print("⚠️ Laptop Mode: Simulating Hardware (No real LED/Buzzer)")
+    print("⚠️ Laptop Mode: Simulating Hardware")
 
 def trigger_alert(enable, animal_name="Target"):
-    """Handles LED, Buzzer, and Sound simultaneously"""
     global sound_cooldown
-
     if enable:
-        # 1. VISUAL & HAPTIC: Turn on LED and Buzzer
         if ON_RASPBERRY_PI:
             GPIO.output(LED_PIN, GPIO.HIGH)
             GPIO.output(BUZZER_PIN, GPIO.HIGH)
         
-        # 2. AUDIO: Play sound
-        # We check cooldown so we don't crash the audio driver
         if time.time() - sound_cooldown > COOLDOWN_TIME:
             print(f"🚨 ALARM TRIGGERED! Detected: {animal_name}")
-            
             if ON_RASPBERRY_PI:
-                # 'aplay' is the built-in command line audio player for Pi
-                # The '&' symbol runs it in background so video doesn't freeze
                 os.system(f"aplay -q {SOUND_FILE} &")
-            else:
-                # For Windows testing
-                try:
-                    import winsound
-                    winsound.PlaySound(SOUND_FILE, winsound.SND_ASYNC)
-                except:
-                    print(f"❌ Error: Could not find {SOUND_FILE}")
-            
             sound_cooldown = time.time()
-            
     else:
-        # Turn everything OFF
         if ON_RASPBERRY_PI:
             GPIO.output(LED_PIN, GPIO.LOW)
             GPIO.output(BUZZER_PIN, GPIO.LOW)
@@ -70,9 +53,15 @@ print("⏳ Loading YOLOv8 Model...")
 model = YOLO('yolov8n.pt')
 
 print("📷 Opening Camera...")
-cap = cv2.VideoCapture(0)
-cap.set(3, 640) # Width
-cap.set(4, 480) # Height
+# Try multiple camera indexes in case 0 is busy
+for idx in [0, -1, 1]:
+    cap = cv2.VideoCapture(idx)
+    if cap.isOpened():
+        print(f"✅ Camera found on index {idx}")
+        break
+
+cap.set(3, 640) 
+cap.set(4, 480) 
 
 if not cap.isOpened():
     print("❌ Error: Camera not found!")
@@ -81,44 +70,35 @@ if not cap.isOpened():
 print(f"🚀 SYSTEM ARMED. Audio File: {SOUND_FILE}")
 
 # --- MAIN LOOP ---
-while True:
-    ret, frame = cap.read()
-    if not ret: break
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret: break
 
-    # Run Detection
-    results = model(frame, stream=True, verbose=False, conf=0.5)
-    
-    threat_detected = False
-    animal_name = ""
+        results = model(frame, stream=True, verbose=False, conf=0.5)
+        
+        threat_detected = False
+        animal_name = ""
 
-    for r in results:
-        for box in r.boxes:
-            cls = int(box.cls[0])
-            if cls in TARGET_CLASSES:
-                threat_detected = True
-                animal_name = model.names[cls].upper()
-                
-                # Draw Red Box
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                cv2.putText(frame, f"THREAT: {animal_name}", (x1, y1-10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        for r in results:
+            for box in r.boxes:
+                cls = int(box.cls[0])
+                if cls in TARGET_CLASSES:
+                    threat_detected = True
+                    animal_name = model.names[cls].upper()
+                    
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                    cv2.putText(frame, f"THREAT: {animal_name}", (x1, y1-10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-    # Trigger or Reset Alarm
-    if threat_detected:
-        trigger_alert(True, animal_name)
-    else:
-        trigger_alert(False)
+        trigger_alert(threat_detected, animal_name)
+        cv2.imshow("Guardian AI View", frame)
 
-    # Show Feed
-    cv2.imshow("Guardian AI View", frame)
-
-    # Press 'q' to quit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# Cleanup
-cap.release()
-cv2.destroyAllWindows()
-if ON_RASPBERRY_PI:
-    GPIO.cleanup()
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+    if ON_RASPBERRY_PI:
+        GPIO.cleanup()
